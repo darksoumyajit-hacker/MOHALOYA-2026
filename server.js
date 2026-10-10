@@ -1,5 +1,5 @@
 // ============================================================
-// 🔱 MAHALAYA LIVE 2026 — SERVER (FIXED)
+// 🔱 MAHALAYA LIVE 2026 — SERVER (FIXED v3)
 // ============================================================
 
 // ============================================================
@@ -11,7 +11,7 @@ const ADMIN_PASSWORD = "@MIMIJAN#1234";
 // END ADMIN CONFIGURATION
 // ============================================================
 
-// Session secret — change this to any long random string.
+// Session secret — change to any long random string.
 // Keeping it fixed means admin sessions survive server restarts.
 const SESSION_SECRET = "mahalaya-live-2026-change-this-secret-string-please-xyz";
 
@@ -109,12 +109,21 @@ app.use("/api/", apiLimiter);
 app.use(express.static(path.join(__dirname)));
 
 // ============================================================
-// SAFE CONSTANT-TIME COMPARE (handles unequal lengths)
+// ✅ FIXED SAFE COMPARE
+// Previous version called hmacKey.copy() which does NOT exist
+// on Node's Hmac object → TypeError → HTTP 500.
+// Now we create a FRESH HMAC for each input. Both digests are
+// always 32 bytes (SHA-256), so timingSafeEqual never throws.
 // ============================================================
 function safeCompare(a, b) {
-  const hmacKey = crypto.createHmac("sha256", SESSION_SECRET);
-  const aHash = hmacKey.copy().update(String(a)).digest();
-  const bHash = hmacKey.copy().update(String(b)).digest();
+  const aHash = crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(String(a))
+    .digest();
+  const bHash = crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(String(b))
+    .digest();
   return crypto.timingSafeEqual(aHash, bHash);
 }
 
@@ -130,28 +139,36 @@ function requireAdmin(req, res, next) {
 // AUTH ROUTES
 // ============================================================
 app.post("/api/admin/login", loginLimiter, (req, res) => {
-  const { username, password } = req.body || {};
+  try {
+    const body = req.body || {};
+    const username = body.username;
+    const password = body.password;
 
-  if (!username || !password) {
-    return res.status(400).json({ error: "Username and password required." });
-  }
+    if (!username || !password) {
+      return res.status(400).json({ error: "Username and password required." });
+    }
 
-  const usernameMatch = safeCompare(username, ADMIN_USERNAME);
-  const passwordMatch = safeCompare(password, ADMIN_PASSWORD);
+    const okUser = safeCompare(username, ADMIN_USERNAME);
+    const okPass = safeCompare(password, ADMIN_PASSWORD);
 
-  if (usernameMatch && passwordMatch) {
+    if (!okUser || !okPass) {
+      return res.status(401).json({ error: "Invalid credentials." });
+    }
+
     req.session.isAdmin = true;
     req.session.adminUser = ADMIN_USERNAME;
-    return req.session.save((err) => {
+
+    req.session.save((err) => {
       if (err) {
-        console.error("Session save error:", err);
-        return res.status(500).json({ error: "Session error. Try again." });
+        console.error("[Session save error]", err);
+        return res.status(500).json({ error: "Session save failed." });
       }
       return res.json({ success: true, user: ADMIN_USERNAME });
     });
+  } catch (e) {
+    console.error("[Login error]", e);
+    return res.status(500).json({ error: "Server error: " + e.message });
   }
-
-  return res.status(401).json({ error: "Invalid credentials." });
 });
 
 app.post("/api/admin/logout", (req, res) => {
@@ -182,6 +199,16 @@ app.get("*", (req, res, next) => {
   if (req.method !== "GET") return next();
   if (req.path.startsWith("/api/")) return next();
   res.sendFile(path.join(__dirname, "index.html"));
+});
+
+// ============================================================
+// GLOBAL ERROR HANDLER — prevents silent 500s
+// ============================================================
+app.use((err, req, res, next) => {
+  console.error("[Global error]", err);
+  if (!res.headersSent) {
+    res.status(500).json({ error: "Server error." });
+  }
 });
 
 app.listen(PORT, () => {
